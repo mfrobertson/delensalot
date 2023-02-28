@@ -29,7 +29,7 @@ import healpy as hp
 _write_alm = lambda fn, alm : hp.write_alm(fn, alm, overwrite=True)
  
 class cpp_sims_lib:
-    def __init__(self, k, v='', param_file='cmbs4wide_planckmask', label='', module='lenscarf'):
+    def __init__(self, k, v='', param_file='cmbs4wide_planckmask', label='', module='lenscarf', export=False):
         """Helper library to plot results from MAP estimation of simulations.
         
         This class loads the results of the runs done with the param_file and the options asked
@@ -58,7 +58,6 @@ class cpp_sims_lib:
         self.mmax_qlm = self.param.mmax_qlm
 
         # self.plms = [[None]*(itmax+1)]*(imax+1)
-        self.cacher_param = cachers.cacher_npy(opj(self.TEMP, 'cpplib'))
         self.fsky = self.get_fsky() 
 
         # Cl wieghts used in the QE (either lensed Cls or grad Cls)
@@ -76,6 +75,12 @@ class cpp_sims_lib:
                        (self.param.lmin_tlm,  self.param.lmin_elm, self.param.lmin_blm), 
                        self.param.lmax_ivf, self.param.lmax_qlm)
 
+        if export:
+            self.cache_dir = opj(os.environ['HOME'], 'lenscarfrecs', self.param.suffix)
+        else:
+            self.cache_dir = self.TEMP
+
+        self.cacher_param = cachers.cacher_npy(opj(self.cache_dir, 'cpplib'))
 
         # if type(self.param.sims.sims_cmb_len).__name__ == 'cmb_len_ffp10':
         #     self.sims_unl = planck2018_sims.cmb_unl_ffp10() 
@@ -85,17 +90,14 @@ class cpp_sims_lib:
         #     assert 0, "I do not know what are the unlensed sims"
 
     def libdir_sim(self, simidx):
-        return opj(self.TEMP,'%s_sim%04d'%(self.k, simidx) + self.version)
-
-
-    def get_itlib_sim(self, simidx, tol):
-        tol_iter  = 10 ** (- tol) 
-        return self.param.get_itlib(self.k, simidx, self.version, tol_iter)
-
+        return opj(self.cache_dir,'%s_sim%04d'%(self.k, simidx) + self.version)
 
     def cacher_sim(self, simidx, verbose=False):
         return cachers.cacher_npy(opj(self.libdir_sim(simidx), 'cpplib'), verbose=verbose)
 
+    def get_itlib_sim(self, simidx, tol):
+        tol_iter  = 10 ** (- tol) 
+        return self.param.get_itlib(self.k, simidx, self.version, tol_iter)
 
     def get_plm(self, simidx, itr, use_cache=True):
         if use_cache:
@@ -361,7 +363,7 @@ class cpp_sims_lib:
         this_mcs = np.unique(mc_sims)
 
         cacher = cachers.cacher_npy(self.cacher_param.lib_dir, verbose=verbose)
-        fn =  f'simMF_itr{itmax}_k_{mchash(mc_sims)}.fits'
+        fn =  f'simMF_itr{itmax}_k_{mchash(mc_sims)}'
         if not cacher.is_cached(fn) or recache:
             MF = np.zeros(hp.Alm.getsize(self.lmax_qlm), dtype=complex)
             if len(this_mcs) == 0: return MF
