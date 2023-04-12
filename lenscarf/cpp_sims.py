@@ -193,7 +193,7 @@ class cpp_sims_lib:
         return cpp_in
 
 
-    def abcef(self, simidx, itr):
+    def get_cpp_itXinput(self, simidx, itr):
         fn = 'cpp_in_x_it{}'.format(itr)
         cacher = self.cacher_sim(simidx)
         if not cacher.is_cached(fn):
@@ -328,17 +328,22 @@ class cpp_sims_lib:
             mf_sims = np.unique(self.param.mc_sims_mf_it0 if not 'noMF' in self.version else np.array([]))
         else:
             mf_sims = np.unique(mf_sims)
-        mf0 = self.param.qlms_dd.get_sim_qlm_mf(self.k, mf_sims)  # Mean-field of the QE
-        # print(len(mf_sims))
-        
-        
-        # mc_sims_less = mf_sims
+        if hasattr(self.param, 'qlms_dd_fid'):
+            # Mean field is estimated from the fiducial sims
+            qlms_dd = self.param.qlms_dd_fid
+        else:
+            qlms_dd = self.param.qlms_dd
+
+        mf0 = qlms_dd.get_sim_qlm_mf(self.k, mf_sims)  # Mean-field of the QE
+
 
         Nmf = len(mf_sims)
-        for simid in np.atleast_1d(simidx):
-            if simid in mf_sims:
-                mf0 = (mf0 - self.param.qlms_dd.get_sim_qlm(self.k, int(simid)) / Nmf) * (Nmf / (Nmf - 1))
-                Nmf -= 1
+        if hasattr(self.param, 'qlms_dd_fid'):
+            # In this case the sims are different so there is no overlap of MF sims with the data sim
+            for simid in np.atleast_1d(simidx):
+                if simid in mf_sims:
+                    mf0 = (mf0 - self.param.qlms_dd.get_sim_qlm(self.k, int(simid)) / Nmf) * (Nmf / (Nmf - 1))
+                    Nmf -= 1
         return mf0 
 
 
@@ -390,8 +395,12 @@ class cpp_sims_lib:
         if resp_gradcls: 
             fn_resp_qe += '_gradcls'
         cacher = self.cacher_param
-        if not cacher.is_cached(fn_resp_qe):
-            R = qresp.get_response(self.k, self.param.lmax_ivf, 'p', self.cls_weights, self.cls_grad, {'e': self.param.fel, 'b': self.param.fbl, 't':self.param.ftl}, lmax_qlm=self.param.lmax_qlm)[0]
+        if not cacher.is_cached(fn_resp_qe) or recache:
+            if resp_gradcls:
+                cls_cmb = self.cls_grad
+            else:
+                cls_cmb = self.param.cls_len
+            R = qresp.get_response(self.k, self.param.lmax_ivf, 'p', self.cls_weights, cls_cmb, {'e': self.param.fel, 'b': self.param.fbl, 't':self.param.ftl}, lmax_qlm=self.param.lmax_qlm)[0]
             cacher.cache(fn_resp_qe, R)
         R = cacher.load(fn_resp_qe)
         # iterbiases = n0n1_iterative.polMAPbiases(self.config, fidcls_unl=self.param.cls_unl, itrmax = 0, cacher=self.cacher_param)
@@ -770,12 +779,14 @@ class cpp_sims_lib:
 
 
 
-    def get_gauss_cov(self, version='', w=lambda ls : 1.,  edges=None, withN1=False, cosmicvar=True):
+
+
+    def get_gauss_cov(self, version='', w=lambda ls : 1.,  edges=None, withN1=False, cosmicvar=True, cpp=None):
         N0_map, N1_map, map_resp, _ = self.get_N0_N1_iter(15, version=version)
         N0_qe, N1_qe= self.get_N0_N1_QE(normalize=True)
-        
-        cov_qe =  1./(2.*np.arange(self.lmax_qlm+1) +1.)  / self.fsky * 2 * ((self.cpp_fid[:self.lmax_qlm+1]*cosmicvar + N0_qe[:self.lmax_qlm+1] + N1_qe[:self.lmax_qlm+1]*withN1) * w(np.arange(self.lmax_qlm+1) +1))**2 
-        cov_map =1./(2.*np.arange(self.lmax_qlm+1) +1.) / self.fsky * 2 * ((self.cpp_fid[:self.lmax_qlm+1]*cosmicvar + N0_map[:self.lmax_qlm+1] + N1_map[:self.lmax_qlm+1]*withN1) * w(np.arange(self.lmax_qlm+1) +1))**2 
+        if cpp is None: cpp = self.cpp_fid
+        cov_qe =  1./(2.*np.arange(self.lmax_qlm+1) +1.)  / self.fsky * 2 * ((cpp[:self.lmax_qlm+1]*cosmicvar + N0_qe[:self.lmax_qlm+1] + N1_qe[:self.lmax_qlm+1]*withN1) * w(np.arange(self.lmax_qlm+1) +1))**2 
+        cov_map =1./(2.*np.arange(self.lmax_qlm+1) +1.) / self.fsky * 2 * ((cpp[:self.lmax_qlm+1]*cosmicvar + N0_map[:self.lmax_qlm+1] + N1_map[:self.lmax_qlm+1]*withN1) * w(np.arange(self.lmax_qlm+1) +1))**2 
         
         if edges is not None:
             nbins = len(edges) - 1
@@ -793,8 +804,11 @@ class cpp_sims_lib:
 
         else:
             return cov_qe, cov_map
+ 
 
-    def get_dcpp_qe_map(self, cppsim_shuffle, wf_eff, qe_resp_fid, Nsims, mf_sims, itr:int, do_bin=False, nbin:int=None, ellb=None, do_spline=False, edges=None, lmin=None, lmax=None, k=3, s=None, recache=False):
+    def get_dcpp_qe_map(self, cppsim_shuffle, wf_eff, qe_resp_fid, Nsims, mf_sims, itr:int, 
+                        do_bin=False, nbin:int=None, ellb=None, do_spline=False, edges=None,
+                          lmin=None, lmax=None, k=3, s=None, recache=False, return_stat=False, get_resp_corr=False):
         """Get the Cpp bias by taking the power spectrum of the lensing 
         reconstrutcion with same lensing field but different CMB.
 
@@ -806,8 +820,7 @@ class cpp_sims_lib:
         Nmf = len(mf_sims)
         mf_sims_1 = mf_sims[:int(Nmf/2)]
         mf_sims_2 = mf_sims[int(Nmf/2):]
-        print(mf_sims_1)
-        print(mf_sims_2)
+
         # N1_qe = n1_qe * utils.cli(qe_resp)**2
         
         if lmax is None: lmax = self.lmax_qlm
@@ -861,13 +874,15 @@ class cpp_sims_lib:
             _cpp10_qe = cacher.load(fn_cpp_qe_cross)
             _cpp_in = cppsim_shuffle.get_cpp_input(idx)
             # _cpp_in = cppsim.cpp_fid[:len(_cpp10)]
-            
+            f = lambda x : x
+            if get_resp_corr: 
+                f = lambda x : np.sqrt(x)
             if do_bin:
-                dcpp_10.add(bnd(_cpp10*cli(wf_eff**2)*cli(_cpp_in) - 1, lmin, lmax, edges)[1])  
-                dcpp_10_qe.add(bnd(_cpp10_qe*cli(qe_resp_fid**2)*cli(_cpp_in) - 1, lmin, lmax, edges)[1])
+                dcpp_10.add(bnd(f(_cpp10*cli(wf_eff**2)*cli(_cpp_in)), lmin, lmax, edges)[1])  
+                dcpp_10_qe.add(bnd(f(_cpp10_qe*cli(qe_resp_fid**2)*cli(_cpp_in)), lmin, lmax, edges)[1])
             else:
-                dcpp_10.add(_cpp10*cli(wf_eff**2)*cli(_cpp_in) - 1)
-                dcpp_10_qe.add(_cpp10_qe*cli(qe_resp_fid**2)*cli(_cpp_in) - 1)
+                dcpp_10.add(f(_cpp10*cli(wf_eff**2)*cli(_cpp_in)))
+                dcpp_10_qe.add(f(_cpp10_qe*cli(qe_resp_fid**2)*cli(_cpp_in)))
             
         if do_spline:
             ls = np.arange(lmin, lmax+1)
@@ -875,6 +890,8 @@ class cpp_sims_lib:
             dmap = spline(ls, dcpp_10.mean()[ls], k=k, s=s)(np.arange(lmax+1))
             return dqe, dmap
         
+        if return_stat:
+            return dcpp_10_qe, dcpp_10
         return dcpp_10_qe.mean(), dcpp_10.mean()
 
     def get_delta_cpp(self, itr:int, lmin:int, lmax:int, edges:np.ndarray, wf_it:np.ndarray=None, Resp:np.ndarray=None, n1:np.ndarray=None, resp_n1:np.ndarray=None,  mcs:np.ndarray=np.arange(0, 40), mf_sims:np.ndarray=np.arange(0, 40)):
@@ -941,18 +958,89 @@ class cpp_sims_lib:
         return delta_cpp
 
 
-    def get_sim_cov(self, mcs, edges=None, w= lambda ls: 1, use_rdn0=True):
+    def get_resp_corr(self, wf_it, rfid, N0_map, N1_map, lmin, lmax, edges, use_rdn0=True, nsims=40, itr=50, sub_mf=True, mc_sims=np.arange(0, 40), k=5, s=None):
+        """Correction of RDN0+N1 repsonse
+        
+        get_resp_corr: if true gives correction Estimate mean of Cpp normalisation R^2 or mean of the phi response R ?
+        
+        """
+        bl = edges[:-1];bu = edges[1:]
+        ellb = 0.5 * bl + 0.5 * bu
+        nbin = len(edges) -1 
+        bnd_map_rdrat =  stats(nbin, xcoord=ellb, docov=True)
+        bnd_map_n0rat =  stats(nbin, xcoord=ellb, docov=True)
+        bnd_delta_map =  stats(nbin, xcoord=ellb, docov=True)
+
+        for i in range(nsims):
+            cpp_map = self.get_cpp(i, itr, sub_mf=sub_mf, mf_sims=mc_sims, splitMF=True)
+            cpp_input = self.get_cpp_input(i)
+            RDN0_map  = self.get_rdn0_map(i, itr =itr, Reff=rfid,  useReff=True)
+            
+            map_rd_rat = (cpp_map*utils.cli(wf_it)**2 /self.fsky - cpp_input) *cli(RDN0_map +N1_map)
+            map_n0_rat = (cpp_map*utils.cli(wf_it)**2 /self.fsky - cpp_input) *cli(N0_map +N1_map)
+            
+            dmap = (cpp_map*utils.cli(wf_it)**2 / self.fsky  - N1_map - RDN0_map) * utils.cli(cpp_input)
+            
+            bnd_map_rdrat.add(bnd(map_rd_rat,  lmin, lmax, edges)[1])
+            bnd_map_n0rat.add(bnd(map_n0_rat,  lmin, lmax, edges)[1])
+            bnd_delta_map.add(bnd(dmap,  lmin, lmax, edges)[1])
+
+        bias_map_resp = {}
+        bias_map_n0resp = {}
+        bias_dmap = {}
+        bias_map_resp  = spline(ellb, bnd_map_rdrat.mean(), k=k, s=s)(np.arange(self.lmax_qlm+1))
+        bias_map_n0resp  = spline(ellb, bnd_map_n0rat.mean(), k=k, s=s)(np.arange(self.lmax_qlm+1))
+        bias_dmap = spline(ellb, bnd_delta_map.mean(), k=k, s=s)(np.arange(self.lmax_qlm+1))
+
+        # return (bnd_map_n0rat, bias_map_n0resp), (bnd_map_rdrat, bias_map_resp), (bnd_delta_map, bias_dmap)
+        if use_rdn0:
+            return bnd_map_rdrat, bias_map_resp
+        else:
+            return bnd_map_n0rat, bias_map_n0resp
+
+    def get_sim_cov(self,  wf_it,  qe_resp, map_resp, N1_map, bias_map_resp, lmin, lmax, edges, nsims=40, itr=50, sub_mf=True, mc_sims=np.arange(0, 40),  w= lambda ls: 1):
         """Get Clpp covariance matrix from a set of simulations
         
         Args: 
             mcs: indexes of simulation to use for covariance estimate
             edges: Bin edges
             w: Weighting of the Cls
-            use_rdn0: Debias using rdn0 instead of analytical rdn0
             
         """
+        bl = edges[:-1];bu = edges[1:]
+        ellb = 0.5 * bl + 0.5 * bu
+        nbin = len(edges) -1 
 
-        return 0
+        bnd_map_rd =  stats(nbin, xcoord=ellb, docov=True)
+        bnd_qe_rd =  stats(nbin, xcoord=ellb, docov=True)
+        bnd_map =  stats(nbin, xcoord=ellb, docov=True)
+        bnd_qe =  stats(nbin, xcoord=ellb, docov=True)
+
+        for i in range(nsims):
+            cpp_map = self.get_cpp(i, itr, sub_mf=sub_mf, mf_sims=mc_sims, splitMF=True)
+            cpp_qe = self.get_cpp_qe_raw(i, splitMF=True)    
+
+            RDN0_map  = self.get_rdn0_map(i, itr =itr, Reff=map_resp,  useReff=True)
+
+            rdn0_qe= self.get_rdn0_qe(i, 40, 100, 10)[0]
+            
+            # cpp_map_rd = cpp_map*utils.cli(wf_it)**2 /self.fsky - RDN0_map
+            cpp_map_rd = cpp_map*utils.cli(wf_it)**2 /self.fsky - (RDN0_map+N1_map) * bias_map_resp
+            cpp_qe_rd =  (cpp_qe/self.fsky - rdn0_qe)*utils.cli(qe_resp) **2
+            
+            cpp_map = cpp_map*utils.cli(wf_it)**2 /self.fsky
+            cpp_qe =  (cpp_qe/self.fsky)*utils.cli(qe_resp) **2
+            
+
+            bnd_map_rd.add(bnd(cpp_map_rd,  lmin, lmax, edges, weight=w)[1])
+            bnd_qe_rd.add(bnd(cpp_qe_rd,  lmin, lmax, edges, weight=w)[1])
+            
+            bnd_map.add(bnd(cpp_map,  lmin, lmax, edges, weight=w)[1])
+            bnd_qe.add(bnd(cpp_qe,  lmin, lmax, edges, weight=w)[1])
+
+        return bnd_qe.cov(), bnd_map.cov(), bnd_qe_rd.cov(), bnd_map_rd.cov()
+
+
 
     # def get_mf_it(self, simidx, itr, tol, ret_alm=False, verbose=False):
     #     tol_iter  = 10 ** (- tol) 
